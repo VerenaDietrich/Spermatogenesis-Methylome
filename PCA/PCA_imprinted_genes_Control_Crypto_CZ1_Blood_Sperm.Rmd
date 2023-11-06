@@ -1,0 +1,142 @@
+---
+title: "WGBS Spermatogenesis methylation PCA"
+author: "Originally Dr. Marius Wöste, edited by Verena Dietrich"
+date: "05 31 2023"
+updates: "09  29 2023"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+# Rscript -e "rmarkdown::render('PCA_imprinted_genes_Control_Crypto_CZ1_Blood_Sperm.Rmd')"
+install.packages("scatterplot3d") # Install
+install.packages("rmarkdown")
+install.packages("data.table")
+install.packages("ggplot2")
+install.packages("ggfortify")
+install.packages("openxlsx")
+library(data.table)
+library(stringr)
+library(ggplot2)
+library(ggfortify)
+library(openxlsx)
+library(parallel)
+library("scatterplot3d")
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r includes, include=FALSE, echo=FALSE}
+
+source("/data/gitlab/spermatogenesis-methylome/PCA/PCA_analysis/wgbs-methylation/pca.R")
+```
+
+## WGBS OAT PCA analysis
+
+Alignment was done with bwa-meth and hg38.
+Alignments have been deduplicated using picard tools.
+CpG methylation calling has been performed using MethylDackel.
+
+```{r loading-data}
+
+methylationFilePaths <- c(
+   "/data/bed-graphs/",
+   "/data/bed-graphs/contaminated",
+   "/data/bed-graphs/BloodSperm"
+)
+minCoverage <- 5
+
+methylationValueFiles <- list.files(methylationFilePaths, pattern = ".bedGraph", full.names = TRUE)
+
+methylationValues <- mclapply(methylationValueFiles, function (file) {
+  
+  values <- fread(file, skip = 1L)
+
+  values <- values[V5 + V6 >= minCoverage]
+  
+  rownames(values) <- paste(values$V1, values$V2, sep = "-")
+  
+  return(values)
+}, mc.cores = 8)
+
+### Location of imprinted genes
+
+regions_file <- fread(file = "/data/gitlab/spermatogenesis-methylome/PCA/PCA_analysis/Imprinted_genes_location.csv")
+regions_imprinted_genes <- regions_file$`Location_(hg38)`
+regions_split <- str_split(regions_imprinted_genes, ":|-")
+chr <- lapply(regions_split, `[[`, 1)
+gene_chr <- str_remove(chr, "chr")
+gene_start <- lapply(regions_split, `[[`, 2)
+gene_start <- strtoi(gene_start)
+gene_end <- lapply(regions_split, `[[`, 3)
+gene_end <- strtoi(gene_end)
+
+imprinted_genes <- data.table(V1 = integer(), V2 = integer(), V3 = integer())
+
+for (gene in 1:length(gene_start)){
+  position <- as.integer(seq(gene_start[gene],gene_end[gene]))
+  chr = rep(strtoi(gene_chr[gene]), length(position))
+  imprinted_genes_new <- data.table(V1 = chr, V2 = position, V3 = as.integer(position+1))
+  imprinted_genes <- rbindlist(list(imprinted_genes, imprinted_genes_new))
+}
+
+imprinted_genes <- unique(imprinted_genes)
+
+### Samples for PCA
+
+sampleNames <- tools::file_path_sans_ext(basename(methylationValueFiles))
+sampleNames <- substr(sampleNames, 1, nchar(sampleNames) - nchar("_CpG"))
+
+publicationIDs <- data.table(read.xlsx("/data/gitlab/spermatogenesis-methylome/PCA/PCA_analysis/ENA_PCA_sample_names_plusCrypto.xlsx"))
+groupAssociation <- publicationIDs[match(sampleNames, publicationIDs$current_sample_name)]
+
+groupAssociation$Group <- factor(groupAssociation$group_name_for_PCA_1, levels = c("Sperm", "Blood", "Undiff", "Diff", "4C", "1C"), ordered = TRUE)
+groupAssociation$Patient <- factor(groupAssociation$patient_name_for_PCA, levels = c("Sperm", "Blood","CTR-1", "CTR-2", "CTR-3", "CZ-1", "CZ-2", "CZ-3"), ordered = TRUE)
+
+
+names(methylationValues) <- sampleNames
+groupAssociation$current_sample_name <- as.character(groupAssociation$current_sample_name)
+samplesToKeep <- groupAssociation[!is.na(current_sample_name) & group_name_for_PCA != "not applicable"]$current_sample_name
+methylationValues <- methylationValues[samplesToKeep]
+groupAssociation <- groupAssociation[current_sample_name %in% samplesToKeep]
+
+### Reduce to imprinted genes
+
+rownames(imprinted_genes) <- paste(imprinted_genes$V1, imprinted_genes$V2, sep = "-")
+
+methylationValues$imprinted_genes <- imprinted_genes
+
+methylationInAllSamples <- Reduce(intersect, lapply(methylationValues, rownames))
+methylationValues$imprinted_genes <- NULL 
+intersectedValues <- sapply(methylationValues, function (values) values[rownames(values) %in% methylationInAllSamples]$V4 / 100)
+```
+
+The following plots are generated for all samples for `r nrow(intersectedValues)` CpG loci where all samples show methylation values. Only loci with minimum coverage of 5 in all samples are considered:
+
+```{r pca, echo=FALSE}
+
+
+pca <- prcomp(t(intersectedValues))
+
+groupAssociation <- as.data.frame(groupAssociation)
+
+pca1 <- autoplot(pca, data = groupAssociation, fill = "Group", colour = "Group") +
+
+theme_classic() + 
+  scale_fill_manual(values = c("grey", "pink", "#001889", "#91008D", "#D24E71",  "#EDA200"))+
+    scale_colour_manual(values = c("grey", "pink", "#001889", "#91008D", "#D24E71", "#EDA200")) +
+theme(
+axis.title.x= element_text(colour = "black", size = 7), 
+axis.text.x = element_text(colour = "black", size = 7), 
+axis.text.y = element_text(colour = "black", size = 7),
+axis.title.y =element_text(colour = "black", size = 7), 
+axis.line =   element_line(size = 0.3, colour = "black"), 
+panel.background = element_blank()
+#legend.position = "none"
+)
+
+
+ggsave("/data/gitlab/spermatogenesis-methylome/PCA/PCA_imprinted_genes_Control_Crypto_CZ1_Blood_Sperm.png", width = 9, height = 4, units = "cm", dpi = 300, pca1)
+
+pca1
+```
